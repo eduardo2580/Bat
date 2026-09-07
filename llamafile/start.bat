@@ -1,9 +1,12 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-title Qwen3 Llamafile Launcher
+title Universal GGUF Llamafile Launcher
 
 rem ============================================================
-rem QWEN3 LLAMAFILE SMART LAUNCHER
+rem UNIVERSAL GGUF LLAMAFILE SMART LAUNCHER
+rem Works with Qwen3, Phi-4, DeepSeek, Llama, Mistral, Gemma, and
+rem any other GGUF model. Includes a MAX PERFORMANCE profile that
+rem auto-picks the best GPU backend and maximizes offload/batching.
 rem Tested design target: llamafile 0.10.5 on Windows 10/11
 rem ============================================================
 
@@ -63,7 +66,7 @@ rem Check llamafile version
 rem ------------------------------------------------------------
 echo.
 echo ============================================================
-echo              QWEN3 LLAMAFILE SMART LAUNCHER
+echo            UNIVERSAL GGUF LLAMAFILE LAUNCHER
 echo ============================================================
 echo.
 echo Executable: %LLAMAFILE%
@@ -138,10 +141,10 @@ echo.
 set "MODEL="
 set /a MODEL_COUNT=0
 
-for /f "delims=" %%F in ('dir /b /a:-d "%MODELS_DIR%\*.gguf" 2^>nul') do (
+for /f "delims=" %%F in ('dir /b /s /a:-d "%MODELS_DIR%\*.gguf" 2^>nul') do (
     set /a MODEL_COUNT+=1
-    set "MODEL_!MODEL_COUNT!=%MODELS_DIR%\%%F"
-    echo   !MODEL_COUNT!^) %%F
+    set "MODEL_!MODEL_COUNT!=%%~fF"
+    echo   !MODEL_COUNT!^) %%~nxF
 )
 
 for /f "delims=" %%F in ('dir /b /a:-d "%BASE%*.gguf" 2^>nul') do (
@@ -180,6 +183,35 @@ for %%F in ("%MODEL%") do (
 echo.
 echo Model:      %MODEL_NAME%
 echo Size:       %MODEL_SIZE% bytes
+
+rem ------------------------------------------------------------
+rem Detect model family / reasoning capability from filename.
+rem This lets one launcher safely serve Qwen3, Phi-4, DeepSeek-R1,
+rem Llama, Mistral, Gemma, or anything else without hardcoding a
+rem single model's chat/reasoning format.
+rem ------------------------------------------------------------
+set "MODEL_FAMILY=Generic"
+echo(%MODEL_NAME% | findstr /i "phi-4 phi_4 phi4" >nul && set "MODEL_FAMILY=Phi-4"
+echo(%MODEL_NAME% | findstr /i "qwen3" >nul && set "MODEL_FAMILY=Qwen3"
+echo(%MODEL_NAME% | findstr /i "qwen2 qwen1" >nul && set "MODEL_FAMILY=Qwen2/2.5"
+echo(%MODEL_NAME% | findstr /i "deepseek" >nul && set "MODEL_FAMILY=DeepSeek"
+echo(%MODEL_NAME% | findstr /i "qwq" >nul && set "MODEL_FAMILY=QwQ"
+echo(%MODEL_NAME% | findstr /i "llama" >nul && set "MODEL_FAMILY=Llama"
+echo(%MODEL_NAME% | findstr /i "mistral mixtral" >nul && set "MODEL_FAMILY=Mistral"
+echo(%MODEL_NAME% | findstr /i "gemma" >nul && set "MODEL_FAMILY=Gemma"
+
+rem Only models that actually emit <think> / reasoning traces should
+rem get --reasoning-format / --reasoning-budget. Forcing this on a
+rem non-reasoning model like Phi-4 or Llama can break its output.
+set "REASONING_CAPABLE=0"
+echo(%MODEL_NAME% | findstr /i "qwen3 deepseek-r1 deepseek_r1 deepseekr1 qwq reasoning thinking" >nul && set "REASONING_CAPABLE=1"
+
+echo Family:     %MODEL_FAMILY%
+if "%REASONING_CAPABLE%"=="1" (
+    echo Reasoning:  ENABLED ^(thinking / deepseek trace format^)
+) else (
+    echo Reasoning:  N/A ^(standard chat format^)
+)
 echo.
 
 rem ------------------------------------------------------------
@@ -192,10 +224,12 @@ echo   2 - BALANCED  : recommended default
 echo   3 - QUALITY   : larger context
 echo   4 - CPU ONLY  : no GPU
 echo   5 - CUSTOM    : choose values manually
+echo   6 - MAX PERFORMANCE : full GPU offload, best backend auto-picked,
+echo                          largest safe batch/ubatch, flash-attn on
 echo.
 
 set "PROFILE="
-set /p "PROFILE=Select profile [1-5, default 2]: "
+set /p "PROFILE=Select profile [1-6, default 2]: "
 if not defined PROFILE set "PROFILE=2"
 
 if "%PROFILE%"=="1" goto :profile_fast
@@ -203,6 +237,7 @@ if "%PROFILE%"=="2" goto :profile_balanced
 if "%PROFILE%"=="3" goto :profile_quality
 if "%PROFILE%"=="4" goto :profile_cpu
 if "%PROFILE%"=="5" goto :profile_custom
+if "%PROFILE%"=="6" goto :profile_max
 goto :profile_balanced
 
 :profile_fast
@@ -249,6 +284,35 @@ set "THREADS=%CPU_THREADS%"
 set "PROFILE_NAME=CPU ONLY"
 set "BACKEND=disable"
 set "NGL=0"
+goto :server_options
+
+:profile_max
+rem Maximum-throughput profile for any GGUF model. Pushes GPU offload,
+rem batch sizes, and threads as high as is safely reasonable, and
+rem auto-picks the best available backend instead of asking.
+set "CTX=16384"
+set "BATCH=2048"
+set "UBATCH=1024"
+set "FLASH=on"
+set "MAX_TOKENS=4096"
+set "THREADS=%CPU_THREADS%"
+set "MLock=1"
+set "NGL=999"
+set "PROFILE_NAME=MAX PERFORMANCE"
+
+if "%NVIDIA%"=="1" (
+    set "BACKEND=nvidia"
+) else if "%AMD%"=="1" (
+    set "BACKEND=amd"
+) else if "%INTEL%"=="1" (
+    set "BACKEND=vulkan"
+) else (
+    set "BACKEND=auto"
+)
+
+echo.
+echo Auto-selected GPU backend for MAX PERFORMANCE: %BACKEND%
+echo ^(If you hit RAM pressure from --mlock, disable it in config.bat^)
 goto :server_options
 
 :profile_custom
@@ -392,7 +456,12 @@ set "TIMESTAMP=%date:~-4%%date:~3,2%%date:~0,2%_%time:~0,2%%time:~3,2%%time:~6,2
 set "TIMESTAMP=%TIMESTAMP: =0%"
 set "LOG_FILE=%LOG_DIR%\llamafile_%TIMESTAMP%.log"
 
-set "CMD_ARGS=--server --host %HOST% --port %PORT% --model "%MODEL%" --threads %THREADS% --threads-batch %THREADS% --ctx-size %CTX% --batch-size %BATCH% --ubatch-size %UBATCH% --n-gpu-layers %NGL% --flash-attn %FLASH% --n-predict %MAX_TOKENS% --temp %TEMPERATURE% --top-p %TOP_P% --top-k %TOP_K% --repeat-penalty %REPEAT_PENALTY% --jinja --reasoning-format deepseek --reasoning-budget %REASONING_BUDGET% --log-file "%LOG_FILE%" --perf --fit on"
+set "CMD_ARGS=--server --host %HOST% --port %PORT% --model "%MODEL%" --threads %THREADS% --threads-batch %THREADS% --ctx-size %CTX% --batch-size %BATCH% --ubatch-size %UBATCH% --n-gpu-layers %NGL% --flash-attn %FLASH% --n-predict %MAX_TOKENS% --temp %TEMPERATURE% --top-p %TOP_P% --top-k %TOP_K% --repeat-penalty %REPEAT_PENALTY% --jinja --cont-batching --log-file "%LOG_FILE%" --perf --fit on"
+
+rem Only add reasoning/thinking flags for models that actually emit
+rem thinking traces (Qwen3, DeepSeek-R1, QwQ, ...). Forcing this on
+rem Phi-4, Llama, Mistral, Gemma, etc. would corrupt normal output.
+if "%REASONING_CAPABLE%"=="1" set "CMD_ARGS=%CMD_ARGS% --reasoning-format deepseek --reasoning-budget %REASONING_BUDGET%"
 
 if "%BACKEND%"=="nvidia" set "CMD_ARGS=%CMD_ARGS% --gpu nvidia"
 if "%BACKEND%"=="amd" set "CMD_ARGS=%CMD_ARGS% --gpu amd"
@@ -423,6 +492,8 @@ echo                       CONFIGURATION
 echo ============================================================
 echo Profile:       %PROFILE_NAME%
 echo Model:         %MODEL_NAME%
+echo Family:        %MODEL_FAMILY%
+if "%REASONING_CAPABLE%"=="1" (echo Reasoning:     ENABLED) else (echo Reasoning:     N/A)
 echo CPU threads:   %THREADS%
 echo Context:       %CTX%
 echo Batch:         %BATCH%
@@ -476,7 +547,7 @@ if not errorlevel 1 (
 )
 
 rem Start the server in the background so we can health-check it.
-start "Llamafile-Qwen3" /b "%LLAMAFILE%" %CMD_ARGS%
+start "Llamafile-Server" /b "%LLAMAFILE%" %CMD_ARGS%
 
 set /a HEALTH_ATTEMPTS=0
 :health_loop
